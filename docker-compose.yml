@@ -112,15 +112,17 @@ services:
       KC_DB: dev-mem
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
-      KC_HEALTH_ENABLED: "true"
     command: ["start-dev", "--http-port=8080"]
     ports:
       - "8080:8080"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
+      # /realms/master is the reliable readiness signal on port 8080.
+      # KC_HEALTH_ENABLED uses port 9000 (management port) which is not
+      # exposed here; checking the OIDC master realm endpoint instead.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/master > /dev/null"]
       interval: 10s
       timeout: 5s
-      retries: 15
+      retries: 20
       start_period: 30s
 
   # ----------------------------------------------------------------
