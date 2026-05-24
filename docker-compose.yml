@@ -1,6 +1,6 @@
 ---
-# NHI-Sentinel — Phase 1 Stack
-# Brings up: Keycloak, Vault, PostgreSQL, OPA, LocalStack, Redis
+# NHI-Sentinel — Full Stack
+# Brings up: Keycloak, Vault, PostgreSQL, OPA, LocalStack, Redis, Kafka, Prometheus, Grafana, Loki
 # Start: docker compose up -d
 # Stop:  docker compose down -v
 
@@ -14,6 +14,10 @@ volumes:
   postgres-data:
   vault-data:
   keycloak-data:
+  kafka-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
 
 services:
 
@@ -165,7 +169,7 @@ services:
       retries: 10
 
   # ----------------------------------------------------------------
-  # LocalStack — AWS service simulation (S3, EC2, IAM, STS, SH)
+  # LocalStack — AWS service simulation (S3, EC2, IAM, STS, CloudTrail)
   # ----------------------------------------------------------------
   localstack:
     image: localstack/localstack:3
@@ -186,4 +190,111 @@ services:
       interval: 10s
       timeout: 5s
       retries: 15
+      start_period: 20s
+
+  # ----------------------------------------------------------------
+  # Apache Kafka (KRaft mode — no ZooKeeper)
+  # Hosts the audit.events topic consumed by the anomaly service
+  # ----------------------------------------------------------------
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: nhi-kafka
+    networks: [nhi-net]
+    environment:
+      # KRaft mode — no ZooKeeper required
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_CFG_LOG_RETENTION_HOURS: "168"   # 7 days
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    volumes:
+      - kafka-data:/bitnami/kafka
+    ports:
+      - "9094:9094"   # external (host) access
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ----------------------------------------------------------------
+  # Prometheus — metrics scrape + time-series store
+  # ----------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: nhi-prometheus
+    networks: [nhi-net]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - prometheus-data:/prometheus
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy | grep -q 'Prometheus Server is Healthy'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------------
+  # Grafana Loki — log aggregation (structured JSON logs from all services)
+  # ----------------------------------------------------------------
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: nhi-loki
+    networks: [nhi-net]
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - loki-data:/loki
+      - ./infra/loki/loki.yml:/etc/loki/loki.yml:ro
+    ports:
+      - "3100:3100"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready | grep -q 'ready'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ----------------------------------------------------------------
+  # Grafana — dashboards for agent actions, anomaly scores, approvals
+  # Provisioned with dashboards-as-code from ./dashboards/
+  # ----------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: nhi-grafana
+    networks: [nhi-net]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q '\"database\": \"ok\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
       start_period: 20s

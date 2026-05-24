@@ -23,6 +23,7 @@ dependencies = [
     "boto3",
     "moto[all]>=5.0",
     "kafka-python>=2.0",
+    "aiokafka>=0.10",
     "asyncpg",
     "sqlalchemy[asyncio]>=2.0",
     "redis[hiredis]",
