@@ -60,7 +60,9 @@ NHI-Sentinel implements:
 - A behavioral anomaly detection subsystem that baselines normal agent activity and alerts on deviation
 - A simulation harness for attack scenarios — prompt injection, token theft, rogue agent behavior
 
-This document defines the complete scope of the project: what is being built, why, how, by whom, and what success looks like.
+This project is built to industrial specification — architecture decisions, security controls, and code quality are held to the standard a staff security engineer at an enterprise would apply to a production system. It is developed by a solo engineer using **Claude Code** as an AI pair programmer across all implementation phases. All infrastructure components are open-source and self-hosted; no paid SaaS subscriptions are required to run or demo the platform.
+
+This document defines the complete scope of the project: what is being built, why, how, and what success looks like.
 
 ---
 
@@ -226,37 +228,25 @@ The following items are architecturally desirable but deferred beyond the initia
 
 ---
 
-## 5. Stakeholders & Roles
+## 5. Contributors & Roles
 
-| Role | Name / Team | Responsibilities |
-|------|-------------|-----------------|
-| **Project Owner** | Platform Security Team | Final scope decisions, acceptance criteria approval |
-| **Lead Architect** | (Assigned) | Architecture decisions, ADR authorship, technical direction |
-| **Identity Engineer** | (Assigned) | Keycloak configuration, Vault setup, token flow implementation |
-| **Agent Engineer** | (Assigned) | LangGraph agent implementation, tool registry, task orchestration |
-| **Policy Engineer** | (Assigned) | Rego policy authorship, Cedar policies, policy CI pipeline |
-| **Security Engineer** | (Assigned) | Threat modeling, attack simulation harness, anomaly detection |
-| **DevOps / Platform** | (Assigned) | Docker Compose, Kubernetes manifests, CI/CD pipeline |
-| **Technical Reviewer** | Senior Engineering Lead | Architecture review, code review, documentation review |
+This is a solo engineering project. All roles are held by a single developer, with **Claude Code** serving as AI pair programmer across all implementation phases.
 
-### RACI Matrix
+| Role | Held By | Scope |
+|------|---------|-------|
+| **Lead Architect** | Solo Developer | All architecture decisions, ADR authorship, technical direction |
+| **Identity Engineer** | Solo Developer | Keycloak configuration, Vault setup, RFC 7523 token flow |
+| **Agent Engineer** | Solo Developer | LangGraph agent implementation, tool registry, task orchestration |
+| **Policy Engineer** | Solo Developer | Rego policy authorship, Cedar policies, policy CI pipeline |
+| **Security Engineer** | Solo Developer | Threat modeling, attack simulation harness, anomaly detection |
+| **DevOps / Platform** | Solo Developer | Docker Compose, Kubernetes manifests, CI/CD pipeline |
+| **AI Pair Programmer** | Claude Code | Implementation assistance, code review, debugging, research across all domains |
 
-| Activity | Project Owner | Lead Architect | Identity Eng | Agent Eng | Policy Eng | Security Eng |
-|----------|:---:|:---:|:---:|:---:|:---:|:---:|
-| Architecture design | A | R | C | C | C | C |
-| Identity manifest schema | I | A | R | I | C | C |
-| Token flow implementation | I | A | R | I | I | C |
-| Vault configuration | I | C | R | I | I | C |
-| Agent implementation | I | A | I | R | I | C |
-| Tool registry design | I | A | I | R | C | C |
-| Rego policy authorship | I | C | I | I | R | C |
-| Threat model | I | C | C | C | C | R |
-| Attack simulation | I | C | I | I | I | R |
-| Anomaly detection | I | C | I | I | I | R |
-| Grafana dashboards | I | C | I | I | I | R |
-| Documentation | A | R | C | C | C | C |
+### Development Approach
 
-*R = Responsible, A = Accountable, C = Consulted, I = Informed*
+Claude Code assists with implementation across all domains — it is not a generator that produces throwaway code. Every component is reviewed, understood, and owned by the solo developer before it is committed. Architecture decisions and security tradeoffs remain the developer's responsibility; Claude Code accelerates implementation velocity and surfaces edge cases.
+
+This mirrors how senior engineers work with AI tooling in production environments — using it as a force multiplier without ceding engineering judgment.
 
 ---
 
@@ -527,9 +517,9 @@ The anomaly detection service runs as an independent microservice, consuming the
 | Anomaly Score | Action |
 |---------------|--------|
 | 0.00 – 0.70 | Normal — log only |
-| 0.70 – 0.85 | Elevated — alert to Grafana |
-| 0.85 – 0.95 | High — PagerDuty alert + audit marker |
-| 0.95 – 1.00 | Critical — automatic identity suspension + alert |
+| 0.70 – 0.85 | Elevated — Grafana alert fired |
+| 0.85 – 0.95 | High — Grafana critical alert + audit marker (routes to Slack / ntfy) |
+| 0.95 – 1.00 | Critical — automatic identity suspension + Grafana alert |
 
 ---
 
@@ -950,11 +940,14 @@ BehavioralBaseline
 
 ### External Integration Points (Notification Only)
 
-| Integration | Purpose | Protocol |
-|-------------|---------|----------|
-| Slack webhook | Approval request notifications, anomaly alerts | HTTPS POST |
-| PagerDuty | Critical anomaly alerts (score > 0.95) | HTTPS API |
-| Grafana | Metrics and log visualization | Prometheus scrape / Loki push |
+| Integration | Purpose | Protocol | Cost |
+|-------------|---------|----------|------|
+| Slack webhook | Approval request notifications, anomaly alerts | HTTPS POST | Free (incoming webhooks) |
+| Grafana Alerting | Critical anomaly alerts (score > 0.95) — fires to Slack or email | Built-in Grafana contact points | Free (self-hosted) |
+| ntfy | Self-hosted push notification alternative to PagerDuty | HTTPS POST | Free (self-hosted) |
+| Grafana | Metrics and log visualization | Prometheus scrape / Loki push | Free (self-hosted) |
+
+> **No paid alerting services.** PagerDuty is excluded — critical alerts route to Grafana Alerting contact points (Slack, email, or self-hosted ntfy). This is functionally equivalent for a reference implementation and requires zero subscription.
 
 ---
 
@@ -1029,9 +1022,12 @@ Full STRIDE analysis is documented in `docs/threat_model.md`. This section summa
 |-----------|-----------|---------|---------------|
 | Agent language | Python | 3.12 | LangGraph compatibility, rich security library ecosystem |
 | Agent framework | LangGraph | 0.2.x | Structured state machines, auditable action graphs |
-| LLM routing | LiteLLM | Latest | Provider-agnostic, avoids lock-in |
+| LLM backend | Ollama | Latest | Free, local, no API key required. Runs llama3.2, qwen2.5, and other tool-calling-capable models on-device |
+| LLM routing | LiteLLM | Latest | Provider-agnostic abstraction over Ollama; drop-in swap to any external provider (Anthropic, OpenAI, Groq) without code changes |
 | API framework | FastAPI | 0.110+ | Async, Pydantic v2 integration, OpenAPI out of the box |
 | Data validation | Pydantic | v2 | Strict schema enforcement on all data crossing service boundaries |
+
+> **Zero LLM cost:** Ollama runs entirely on local hardware. No API keys, no rate limits, no billing. The LiteLLM abstraction means any provider can be substituted by changing one environment variable — useful when running demos on hardware that cannot run a local model.
 
 ### Identity & Secrets
 
@@ -1094,7 +1090,7 @@ Full STRIDE analysis is documented in `docs/threat_model.md`. This section summa
 
 ## 16. Build Phases & Milestones
 
-### Phase 1: Core Identity & Agent (Target: Week 3)
+### Phase 1: Core Identity & Agent
 
 **Goal:** One agent can authenticate with a short-lived token and call a simulated cloud API.
 
@@ -1114,7 +1110,7 @@ Full STRIDE analysis is documented in `docs/threat_model.md`. This section summa
 
 ---
 
-### Phase 2: Policy Engine (Target: Week 6)
+### Phase 2: Policy Engine
 
 **Goal:** Every agent action is evaluated by OPA + Cedar before execution; no bypass path exists.
 
@@ -1133,7 +1129,7 @@ Full STRIDE analysis is documented in `docs/threat_model.md`. This section summa
 
 ---
 
-### Phase 3: Logging & Monitoring (Target: Week 9)
+### Phase 3: Logging & Monitoring
 
 **Goal:** Every action attempt (including DENY) is in an immutable audit store; anomaly detection is live.
 
@@ -1154,7 +1150,7 @@ Full STRIDE analysis is documented in `docs/threat_model.md`. This section summa
 
 ---
 
-### Phase 4: Attack Simulation (Target: Week 12)
+### Phase 4: Attack Simulation
 
 **Goal:** Three attack scenarios are implemented, detected, and documented with automated test assertions.
 
@@ -1258,7 +1254,7 @@ NHI-Sentinel does not pursue certification but is designed to demonstrate alignm
 | ID | Assumption |
 |----|-----------|
 | A-1 | All cloud API interactions will use simulated environments (Moto/LocalStack). No real cloud credentials will be used. |
-| A-2 | The LLM provider used by agents is accessed via LiteLLM with a valid API key. The key is stored in Vault and is not a core security demonstration target. |
+| A-2 | Agents use a locally-running Ollama instance as the LLM backend (no API key, no cost). LiteLLM routes to `ollama/llama3.2` or any tool-calling-capable model available in the local Ollama install. Swapping to an external provider (Anthropic, OpenAI, Groq) requires only an environment variable change and is explicitly supported — it is not a core security demonstration target. |
 | A-3 | Docker and Docker Compose are available in the development environment. |
 | A-4 | Python 3.12 and Node.js 20 are available for development tooling. |
 | A-5 | The build team has access to a GitHub repository with Actions enabled. |
@@ -1269,7 +1265,8 @@ NHI-Sentinel does not pursue certification but is designed to demonstrate alignm
 
 | Dependency | Type | Risk Level | Mitigation |
 |-----------|------|-----------|------------|
-| LLM API (OpenAI / Anthropic) | External SaaS | Medium | LiteLLM abstraction; mock LLM available for CI |
+| Ollama | Self-hosted open source | Low | Runs locally; Docker image pinned; no network dependency at runtime |
+| LiteLLM | Python library | Low | Provider abstraction; Ollama is default; external providers are opt-in only |
 | Keycloak | Self-hosted open source | Low | Well-established project; Docker image pinned |
 | HashiCorp Vault | Self-hosted open source | Low | Docker image pinned; dev mode for local |
 | OPA | Self-hosted open source | Low | Stable project; binary pinned in Dockerfile |
@@ -1437,9 +1434,16 @@ REDIS_URL=redis://redis:6379/0
 OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
 LOG_LEVEL=INFO
 
-# Notifications
+# LLM (Ollama — free, local, no API key required)
+OLLAMA_BASE_URL=http://ollama:11434
+OLLAMA_MODEL=llama3.2                       # Any tool-calling-capable model
+# To use an external provider instead, set:
+# LITELLM_PROVIDER=anthropic
+# ANTHROPIC_API_KEY=<your_key>
+
+# Notifications (all free / self-hosted)
 SLACK_WEBHOOK_URL=<optional>
-PAGERDUTY_ROUTING_KEY=<optional>
+NTFY_TOPIC_URL=<optional>                   # Self-hosted ntfy instance
 ```
 
 ### Appendix C: Key Design Decisions Summary
@@ -1447,6 +1451,7 @@ PAGERDUTY_ROUTING_KEY=<optional>
 | Decision | Choice | Alternative Considered | Rationale |
 |----------|--------|----------------------|-----------|
 | Agent framework | LangGraph | LangChain ReAct | Structured state machines are auditable; ReAct loops are non-deterministic |
+| LLM backend | Ollama (local) | OpenAI / Anthropic API | Zero cost, no API key required, fully reproducible offline. LiteLLM makes it a one-variable swap. |
 | Primary PDP | OPA (Rego) | Casbin, custom logic | Industry standard, bundle distribution, active community |
 | Resource policies | AWS Cedar | OPA only | Cedar has formal verification properties; separation of concerns between general policy (OPA) and resource authorization (Cedar) |
 | Token grant | RFC 7523 JWT Bearer | Client secret | Eliminates static secrets from agent runtime entirely |
@@ -1454,6 +1459,7 @@ PAGERDUTY_ROUTING_KEY=<optional>
 | PEP failure mode | Fail closed (DENY) | Fail open | Security correctness > availability; never allow unknown |
 | ML model | IsolationForest | Deep learning | No GPU required; interpretable; works with small datasets |
 | Policy storage | Git + signed bundle | Database | Auditability, PR review workflow, version history |
+| Alerting | Grafana Alerting + ntfy | PagerDuty | Both are free and self-hosted; functionally equivalent for a reference implementation |
 
 ---
 
