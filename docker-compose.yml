@@ -120,15 +120,15 @@ services:
     command: ["start-dev", "--http-port=8080"]
     ports:
       - "8080:8080"
-      - "9000:9000"
     healthcheck:
       # curl and wget are NOT present in the ubi9-micro based Keycloak 24 image.
-      # The management health endpoint is on port 9000 (requires KC_HEALTH_ENABLED=true).
+      # In Keycloak 24, KC_HEALTH_ENABLED=true exposes /health/ready on port 8080
+      # (the separate management port 9000 was only introduced in Keycloak 25).
       # We use bash's built-in /dev/tcp to make a raw HTTP request — no external tools needed.
       test:
         - "CMD-SHELL"
         - |
-          exec 3<>/dev/tcp/localhost/9000 &&
+          exec 3<>/dev/tcp/localhost/8080 &&
           printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
           grep -q '"status".*"UP"' <&3
       interval: 10s
