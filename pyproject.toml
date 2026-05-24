@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nhi-sentinel"
+version = "0.1.0"
+description = "Non-Human Identity Sentinel — agentic IAM governance platform"
+readme = "readme.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Syed Shaheer Khalid", email = "yatoofire@gmail.com" }]
+
+dependencies = [
+    "langgraph>=0.2.0",
+    "litellm",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-jose[cryptography]",
+    "httpx",
+    "boto3",
+    "moto[all]>=5.0",
+    "kafka-python>=2.0",
+    "asyncpg",
+    "sqlalchemy[asyncio]>=2.0",
+    "redis[hiredis]",
+    "scikit-learn>=1.5",
+    "opentelemetry-sdk",
+    "opentelemetry-instrumentation-fastapi",
+    "opentelemetry-exporter-otlp",
+    "cryptography",
+    "pyyaml",
+    "click",
+    "rich",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "requests",
+]
+
+[project.scripts]
+nhi-sentinel = "nhi_sentinel.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "agents",
+    "identity",
+    "pep",
+    "policy",
+    "audit",
+    "anomaly",
+    "approval",
+    "cloud_sim",
+    "attack_sim",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=. --cov-report=term-missing --cov-report=xml"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true

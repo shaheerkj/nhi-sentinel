@@ -1,0 +1,44 @@
+apiVersion: nhi-sentinel/v1
+kind: AgentIdentity
+metadata:
+  name: agent-infra-001
+  namespace: platform-engineering
+  labels:
+    team: platform
+    environment: staging
+    classification: autonomous-agent
+spec:
+  agent_type: InfraAgent
+  owner_team: platform-engineering
+  owner_contact: platform-oncall@example.com
+
+  credential_ttl_days: 90
+  rotation_policy: automatic
+  rotation_days_before_expiry: 14
+
+  scopes:
+    - cloud:ec2:describe
+    - cloud:s3:list
+    - cloud:s3:read
+
+  allowed_resource_patterns:
+    - "arn:aws:s3:::nhi-data-*"
+    - "arn:aws:ec2:us-east-1:*:instance/*"
+  blocked_resource_patterns:
+    - "arn:aws:s3:::*-prod-*"
+
+  context_bindings:
+    environments:
+      - staging
+    time_window:
+      start_hour_utc: 8
+      end_hour_utc: 20
+    source_networks:
+      - "0.0.0.0/0"
+    max_actions_per_minute: 20
+
+  approval_required_for:
+    - risk_level: high
+    - action_patterns:
+        - "*:Delete*"
+        - "*:Terminate*"

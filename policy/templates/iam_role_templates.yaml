@@ -1,0 +1,61 @@
+# Pre-approved IAM role templates for ProvisionerAgent.
+# ProvisionerAgent may ONLY create roles defined here.
+# Arbitrary role creation is forbidden at the Cedar policy layer.
+#
+# Adding a new template requires a PR review and policy team sign-off.
+
+templates:
+
+  ec2-readonly:
+    description: "EC2 read-only access for monitoring agents"
+    assume_role_policy_document:
+      Version: "2012-10-17"
+      Statement:
+        - Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+          Action: sts:AssumeRole
+    managed_policy_arns:
+      - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+    risk_level: low
+
+  s3-readonly-internal:
+    description: "S3 read access restricted to internal-tagged buckets"
+    assume_role_policy_document:
+      Version: "2012-10-17"
+      Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+    inline_policy:
+      Version: "2012-10-17"
+      Statement:
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:ListBucket
+          Resource: "*"
+          Condition:
+            StringEquals:
+              "s3:ExistingObjectTag/DataClassification": "internal"
+    risk_level: low
+
+  data-pipeline-writer:
+    description: "S3 write access for data pipeline stages (internal buckets only)"
+    assume_role_policy_document:
+      Version: "2012-10-17"
+      Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+    inline_policy:
+      Version: "2012-10-17"
+      Statement:
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+          Resource: "arn:aws:s3:::nhi-data-internal-*/*"
+    risk_level: medium
