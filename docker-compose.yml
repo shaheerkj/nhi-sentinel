@@ -197,7 +197,7 @@ services:
   # Hosts the audit.events topic consumed by the anomaly service
   # ----------------------------------------------------------------
   kafka:
-    image: bitnami/kafka:3.7.1
+    image: bitnami/kafka:latest
     container_name: nhi-kafka
     networks: [nhi-net]
     environment:
