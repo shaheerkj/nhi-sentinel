@@ -133,7 +133,6 @@ services:
     entrypoint: ["/bin/bash", "/keycloak-init.sh"]
     volumes:
       - ./infra/keycloak/keycloak-init.sh:/keycloak-init.sh:ro
-      - ./infra/keycloak/realm-export.json:/realm-export.json:ro
     depends_on:
       keycloak:
         condition: service_healthy
@@ -143,7 +142,7 @@ services:
   # Open Policy Agent — policy decision point (sidecar pattern)
   # ----------------------------------------------------------------
   opa:
-    image: openpolicyagent/opa:0.63.0-rootless
+    image: openpolicyagent/opa:latest-rootless
     container_name: nhi-opa
     networks: [nhi-net]
     command:
