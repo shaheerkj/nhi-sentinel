@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import logging
-import os
 import socket
 from typing import Any, TypedDict
 
-import boto3
 from langgraph.graph import END, StateGraph
 
 from agents.base.tool_registry import ToolRegistry, ToolSpec
+from audit.producer import AuditProducer
+from audit.schema import AuditEvent
 from identity.manifest_schema import AgentType
 from identity.token_manager import TokenManager
-from pep.client import PolicyEnforcementPoint, execute_tool
+from pep.client import PolicyEnforcementPoint
 from pep.models import ActionRequest
 
 logger = logging.getLogger(__name__)
@@ -33,12 +33,14 @@ class AgentState(TypedDict):
 
 
 class BaseAgent:
-    """
-    Structured state machine agent. All subclasses inherit the same
-    auth → policy_check → execute → audit_record flow.
+    """Structured state machine agent.
 
-    Subclasses implement _get_aws_client() and register their own
-    tool handlers via _build_tool_handlers().
+    All subclasses share the same:
+        fetch_token → load_task → policy_check → execute_tool → audit_record → END
+                                              ↘ error_handler → audit_record → END
+
+    Every action attempt — whether ALLOW, DENY, or REQUIRE_APPROVAL — produces
+    an AuditEvent published to the AuditProducer (Kafka or in-memory fallback).
     """
 
     agent_type: AgentType
@@ -50,6 +52,7 @@ class BaseAgent:
         tool_registry: ToolRegistry,
         pep: PolicyEnforcementPoint,
         region: str = "us-east-1",
+        audit_producer: AuditProducer | None = None,
     ) -> None:
         self._agent_id = agent_id
         self._token_manager = token_manager
@@ -57,6 +60,7 @@ class BaseAgent:
         self._pep = pep
         self._region = region
         self._source_ip = self._get_source_ip()
+        self._audit = audit_producer or AuditProducer()
         self._graph = self._build_graph()
 
     # ------------------------------------------------------------------
@@ -83,9 +87,10 @@ class BaseAgent:
             {"allowed": "execute_tool", "denied": "error_handler", "approval": "error_handler"},
         )
 
+        # Both paths converge at audit_record — every action is logged.
         graph.add_edge("execute_tool", "audit_record")
+        graph.add_edge("error_handler", "audit_record")
         graph.add_edge("audit_record", END)
-        graph.add_edge("error_handler", END)
 
         return graph.compile()
 
@@ -102,8 +107,6 @@ class BaseAgent:
         return state
 
     def _node_load_task(self, state: AgentState) -> AgentState:
-        # In Phase 1, tasks are passed directly in context.
-        # Phase 3 will query the task registry.
         logger.debug("Task loaded: %s", state["task_id"])
         return state
 
@@ -114,6 +117,7 @@ class BaseAgent:
             state["decision"] = "DENY"
             state["error"] = str(exc)
             return state
+
         request = ActionRequest(
             agent_id=self._agent_id,
             agent_type=self.agent_type.value,
@@ -157,16 +161,27 @@ class BaseAgent:
         return state
 
     def _node_audit_record(self, state: AgentState) -> AgentState:
-        # Phase 3 will write a full AuditEvent to Kafka.
-        # For Phase 1, log to stdout in structured format.
+        result = state.get("result")
+        event = AuditEvent(
+            agent_id=self._agent_id,
+            agent_type=self.agent_type.value,
+            task_id=state["task_id"],
+            action=state.get("action", state["tool_key"]),
+            resource_arn=state["resource_arn"],
+            decision=state.get("decision") or "UNKNOWN",
+            decision_reason=state.get("error"),
+            environment=state.get("environment"),
+            source_ip=self._source_ip,
+            execution_result=result if isinstance(result, dict) else None,
+            execution_error=state.get("error"),
+        )
+        self._audit.publish(event)
         logger.info(
-            "AUDIT | agent=%s | task=%s | action=%s | resource=%s | decision=%s | error=%s",
+            "AUDIT | agent=%s | task=%s | action=%s | decision=%s",
             self._agent_id,
             state["task_id"],
             state.get("action"),
-            state.get("resource_arn"),
             state.get("decision"),
-            state.get("error"),
         )
         return state
 
