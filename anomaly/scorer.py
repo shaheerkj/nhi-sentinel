@@ -1,18 +1,21 @@
-"""Behavioral anomaly detection using Isolation Forest.
+"""Behavioral anomaly detection.
 
-Scores each AuditEvent for anomalousness based on per-agent behavioral features.
-A score near 1.0 indicates a highly anomalous event. The standard threshold for
-triggering automatic identity suspension is ANOMALY_THRESHOLD = 0.95.
+Two complementary detectors:
 
-Feature vector (all normalized to [0.0, 1.0]):
-  0  hour_of_day     — time-of-day pattern (agents work in predictable windows)
-  1  is_deny         — denied actions are unusual for a healthy agent
-  2  is_destructive  — delete/terminate/destroy/purge are high-signal deviations
-  3  arn_length      — unusually long ARNs may indicate path traversal
-  4  action_service  — service category (s3, ec2, iam, guardduty, securityhub, other)
+AnomalyScorer (IsolationForest):
+  Per-event behavioral feature scorer. Trained on known-good events.
+  Detects unusual action types, services, or time-of-day patterns.
+  Best for: novel action classes, IAM calls from wrong agent type, etc.
 
-Fitting requirement: at least MIN_FIT_SAMPLES events.
-Returns 0.0 before the model is fitted (safe default — no false positives on cold start).
+BurstDetector (rate-based):
+  Counts events in a rolling window. Fires when rate exceeds
+  baseline × threshold_multiplier.
+  Best for: rogue agent delete bursts, scanning probes, DDoS-style action floods.
+  Does not require training — works from the first event.
+
+Both detectors are used together in production:
+  AnomalyScorer catches qualitative deviations (what kind of action).
+  BurstDetector catches quantitative deviations (how many actions).
 """
 
 from __future__ import annotations
@@ -26,7 +29,8 @@ from audit.schema import AuditEvent
 
 logger = logging.getLogger(__name__)
 
-ANOMALY_THRESHOLD = 0.95
+ANOMALY_THRESHOLD = 0.95   # AnomalyScorer: triggers identity suspension
+BURST_THRESHOLD = 10       # BurstDetector: events per window before suspension
 
 _DESTRUCTIVE_KEYWORDS = frozenset(
     ("delete", "terminate", "destroy", "remove", "drop", "purge")
@@ -60,10 +64,10 @@ class AnomalyScorer:
 
     Usage:
         scorer = AnomalyScorer()
-        scorer.fit(baseline_events)          # train on known-good events
-        score = scorer.score(new_event)      # 0.0 = normal, 1.0 = highly anomalous
-        if scorer.is_anomalous(new_event):   # True if score >= ANOMALY_THRESHOLD
-            suspend_identity(event.agent_id)
+        scorer.fit(baseline_events)
+        score = scorer.score(new_event)      # 0.0 = normal, 1.0 = anomalous
+        if scorer.is_anomalous(new_event, threshold=0.6):
+            alert(event.agent_id)
     """
 
     MIN_FIT_SAMPLES = 10
@@ -92,11 +96,8 @@ class AnomalyScorer:
     def score(self, event: AuditEvent) -> float:
         """Return anomaly score in [0.0, 1.0]. Returns 0.0 before fitting.
 
-        Uses decision_function (positive=inlier, negative=outlier) passed through
-        a sigmoid so the mapping is self-calibrated to the model's threshold.
-        df >> 0 (clearly normal)   → score near 0.0
-        df == 0 (boundary)         → score = 0.5
-        df << 0 (clearly anomalous) → score near 1.0
+        Uses decision_function (positive=inlier, negative=outlier) mapped through
+        sigmoid(10x) so the output is self-calibrated to the model's boundary.
         """
         if not self._fitted:
             return 0.0
@@ -111,3 +112,66 @@ class AnomalyScorer:
     @property
     def fitted(self) -> bool:
         return self._fitted
+
+
+class BurstDetector:
+    """Rate-based burst detector for rogue agent action floods.
+
+    No training required. Works from the first event.
+    Counts events recorded via record(). Fires when count exceeds
+    baseline_rate × threshold_multiplier.
+
+    Usage:
+        detector = BurstDetector()
+        for event in audit_stream:
+            if event.agent_id == target_agent:
+                detector.record()
+        if detector.is_burst():
+            suspend_identity(target_agent)
+    """
+
+    def __init__(
+        self,
+        baseline_rate: float = 2.0,
+        threshold_multiplier: float = 5.0,
+    ) -> None:
+        """
+        Args:
+            baseline_rate: Expected normal events per measurement window.
+            threshold_multiplier: Fires when count > baseline * this factor.
+        """
+        self._baseline = baseline_rate
+        self._threshold = threshold_multiplier
+        self._count = 0
+
+    def record(self) -> None:
+        """Record that one event occurred."""
+        self._count += 1
+
+    def record_many(self, n: int) -> None:
+        """Record n events at once."""
+        self._count += n
+
+    def is_burst(self) -> bool:
+        """True when the event count exceeds the burst threshold."""
+        return self._count > self._baseline * self._threshold
+
+    def burst_score(self) -> float:
+        """Normalized burst severity in [0.0, 1.0].
+
+        0.0 = at or below baseline.
+        1.0 = at or above threshold (and clamped beyond).
+        """
+        if self._count <= self._baseline:
+            return 0.0
+        burst_threshold = self._baseline * self._threshold
+        excess = (self._count - self._baseline) / (burst_threshold - self._baseline)
+        return round(min(1.0, max(0.0, excess)), 4)
+
+    def reset(self) -> None:
+        """Reset counter for a new measurement window."""
+        self._count = 0
+
+    @property
+    def count(self) -> int:
+        return self._count

@@ -48,7 +48,12 @@ class PolicyEnforcementPoint:
         """Evaluate request against OPA. Raises on DENY or REQUIRE_APPROVAL.
 
         This method has no return value — if it returns normally, the action is allowed.
+        Evaluation order:
+          0. IP binding check (client-side, pre-OPA) — rejects replayed tokens
+          1. OPA Rego — general context
+          2. Cedar — resource-level tags
         """
+        self._check_ip_binding(request)
         decision = self._evaluate(request)
 
         log_extra = {
@@ -80,6 +85,34 @@ class PolicyEnforcementPoint:
         # DENY
         logger.warning("PEP DENY", extra=log_extra)
         raise PolicyDenialError(request.action, decision.reason, decision.policy_ref)
+
+    # ------------------------------------------------------------------
+    # IP binding (Layer 0 — pre-OPA)
+    # ------------------------------------------------------------------
+
+    def _check_ip_binding(self, request: ActionRequest) -> None:
+        """Reject tokens replayed from an unauthorized source IP.
+
+        If the token carries a source_ip claim (written at issuance time by
+        TokenManager), the request must originate from that exact IP. A mismatch
+        means the token was used by a different host — either stolen or leaked.
+        OPA is never consulted for an IP-mismatched request.
+        """
+        token_ip = request.token_claims.get("source_ip") or (
+            (request.token_claims.get("agent_context") or {}).get("source_ip")
+        )
+        if token_ip and token_ip != request.source_ip:
+            logger.warning(
+                "IP binding violation | agent=%s | token_ip=%s | request_ip=%s",
+                request.agent_id,
+                token_ip,
+                request.source_ip,
+            )
+            raise PolicyDenialError(
+                request.action,
+                f"Token IP binding violation: token bound to {token_ip}, request from {request.source_ip}",
+                "pep.ip_binding",
+            )
 
     # ------------------------------------------------------------------
     # OPA evaluation
