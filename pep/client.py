@@ -35,10 +35,16 @@ _OPA_POLICY_PATH = "v1/data/nhi/agent/authorization/response"
 
 
 class PolicyEnforcementPoint:
-    def __init__(self, opa_url: str | None = None, cedar: CedarEvaluator | None = None) -> None:
+    def __init__(
+        self,
+        opa_url: str | None = None,
+        cedar: CedarEvaluator | None = None,
+        redis_client: Any | None = None,
+    ) -> None:
         self._opa_url = (opa_url or os.environ.get("OPA_URL", "http://localhost:8181")).rstrip("/")
         self._http = httpx.Client(timeout=5)
         self._cedar = cedar or CedarEvaluator()
+        self._redis = redis_client  # lazily connected on first use if None
 
     # ------------------------------------------------------------------
     # Primary interface — called by execute_tool()
@@ -49,11 +55,15 @@ class PolicyEnforcementPoint:
 
         This method has no return value — if it returns normally, the action is allowed.
         Evaluation order:
-          0. IP binding check (client-side, pre-OPA) — rejects replayed tokens
-          1. OPA Rego — general context
-          2. Cedar — resource-level tags
+          0a. IP binding check (client-side, pre-OPA) — rejects replayed tokens
+          0b. Suspension check (Redis) — blocks suspended identities even with valid tokens
+          0c. Rate limit counter increment — injects per-minute count into OPA input
+          1.  OPA Rego — general context
+          2.  Cedar — resource-level tags
         """
         self._check_ip_binding(request)
+        self._check_suspension(request)
+        self._inject_rate_limit_count(request)
         decision = self._evaluate(request)
 
         log_extra = {
@@ -113,6 +123,90 @@ class PolicyEnforcementPoint:
                 f"Token IP binding violation: token bound to {token_ip}, request from {request.source_ip}",
                 "pep.ip_binding",
             )
+
+    # ------------------------------------------------------------------
+    # Suspension check (Layer 0b — pre-OPA)
+    # ------------------------------------------------------------------
+
+    def _check_suspension(self, request: ActionRequest) -> None:
+        """Block requests from identities suspended by the anomaly service.
+
+        Suspension state lives in Redis set 'identities:suspended'. A suspended
+        identity's outstanding token remains valid at Keycloak, but the PEP
+        refuses to allow any action until the identity is reinstated.
+        If Redis is unreachable, suspension cannot be enforced — we log and
+        pass through. The anomaly service will simply re-suspend on the next
+        breach. We do not fail-closed here because losing Redis would halt
+        all agents, and the primary security gate is still OPA.
+        """
+        r = self._get_redis()
+        if r is None:
+            return
+        try:
+            if r.sismember("identities:suspended", request.agent_id):
+                logger.warning(
+                    "Suspended identity attempted action | agent=%s | action=%s",
+                    request.agent_id,
+                    request.action,
+                )
+                raise PolicyDenialError(
+                    request.action,
+                    f"Identity {request.agent_id} is suspended",
+                    "pep.identity_suspended",
+                )
+        except PolicyDenialError:
+            raise
+        except Exception as exc:
+            logger.warning("Suspension check failed (Redis): %s — passing through", exc)
+
+    # ------------------------------------------------------------------
+    # Rate limit counter (Layer 0c — pre-OPA, mutates request.context)
+    # ------------------------------------------------------------------
+
+    def _inject_rate_limit_count(self, request: ActionRequest) -> None:
+        """Increment per-agent per-minute counter in Redis, then inject the
+        current count into request.context so OPA's rate_limit.rego can read it.
+
+        Without this, rate_limit.rego silently allows everything because
+        current_action_count_per_minute is never set.
+
+        Failure mode: if Redis is down, no count is injected. OPA's policy
+        treats absent count as "no limit data" and allows — this matches
+        the rego default (within_rate_limit if not input.context...).
+        """
+        r = self._get_redis()
+        if r is None:
+            return
+        try:
+            minute_bucket = int(datetime.now(tz=timezone.utc).timestamp() // 60)
+            key = f"rate:{request.agent_id}:{minute_bucket}"
+            count = r.incr(key)
+            if count == 1:
+                r.expire(key, 120)  # 2x window for safety on bucket boundary
+            request.context["current_action_count_per_minute"] = int(count)
+        except Exception as exc:
+            logger.warning("Rate limit counter failed (Redis): %s", exc)
+
+    # ------------------------------------------------------------------
+    # Redis lazy connection
+    # ------------------------------------------------------------------
+
+    def _get_redis(self) -> Any | None:
+        # getattr default handles PEP instances built via __new__ in unit tests
+        # that bypass __init__ and never set _redis.
+        existing = getattr(self, "_redis", None)
+        if existing is not None:
+            return existing
+        try:
+            import redis  # type: ignore[import-untyped]
+            url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+            self._redis = redis.from_url(url, decode_responses=True, socket_timeout=2)
+            self._redis.ping()
+            return self._redis
+        except Exception as exc:
+            logger.debug("Redis unavailable for PEP checks: %s", exc)
+            self._redis = None
+            return None
 
     # ------------------------------------------------------------------
     # OPA evaluation

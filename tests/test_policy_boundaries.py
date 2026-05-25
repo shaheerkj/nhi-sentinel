@@ -469,3 +469,117 @@ def test_approval_list_pending(fake_redis):
 
     pending = q.list_pending()
     assert len(pending) == 3
+
+
+# ------------------------------------------------------------------
+# Rate limit injection + suspension check (Phase 4 fixes)
+# ------------------------------------------------------------------
+
+def test_pep_injects_rate_limit_count_from_redis(token_claims_infra):
+    """PEP must increment a per-agent Redis counter and inject the value into
+    request.context so rate_limit.rego can read it. Without this injection
+    the policy silently allows unlimited actions."""
+    import fakeredis
+
+    fake = fakeredis.FakeRedis(decode_responses=True)
+    pep = PolicyEnforcementPoint.__new__(PolicyEnforcementPoint)
+    pep._opa_url = "http://localhost:8181"
+    pep._cedar = MagicMock()
+    pep._redis = fake
+
+    request = ActionRequest(
+        agent_id="agent-infra-001",
+        agent_type="InfraAgent",
+        token_claims=token_claims_infra,
+        action="ec2:DescribeInstances",
+        resource_arn="arn:aws:ec2:us-east-1:*:instance/*",
+        task_id="task-rate-001",
+        environment="staging",
+        source_ip="10.0.1.10",
+    )
+
+    pep._inject_rate_limit_count(request)
+    assert request.context["current_action_count_per_minute"] == 1
+
+    pep._inject_rate_limit_count(request)
+    assert request.context["current_action_count_per_minute"] == 2
+
+
+def test_pep_blocks_suspended_identity(token_claims_infra):
+    """A suspended identity must be DENY'd before OPA is even called."""
+    import fakeredis
+
+    fake = fakeredis.FakeRedis(decode_responses=True)
+    fake.sadd("identities:suspended", "agent-infra-001")
+
+    pep = PolicyEnforcementPoint.__new__(PolicyEnforcementPoint)
+    pep._opa_url = "http://localhost:8181"
+    pep._cedar = MagicMock()
+    pep._redis = fake
+    pep._evaluate = MagicMock()  # if called, the test should fail
+
+    request = ActionRequest(
+        agent_id="agent-infra-001",
+        agent_type="InfraAgent",
+        token_claims=token_claims_infra,
+        action="ec2:DescribeInstances",
+        resource_arn="arn:aws:ec2:us-east-1:*:instance/*",
+        task_id="task-suspended-001",
+        environment="staging",
+        source_ip="10.0.1.10",
+    )
+
+    with pytest.raises(PolicyDenialError) as exc_info:
+        pep._check_suspension(request)
+    assert "suspended" in str(exc_info.value).lower()
+    assert exc_info.value.policy_ref == "pep.identity_suspended"
+
+
+def test_pep_allows_non_suspended_identity(token_claims_infra):
+    """An identity not in the suspension set passes the check."""
+    import fakeredis
+    fake = fakeredis.FakeRedis(decode_responses=True)
+
+    pep = PolicyEnforcementPoint.__new__(PolicyEnforcementPoint)
+    pep._opa_url = "http://localhost:8181"
+    pep._cedar = MagicMock()
+    pep._redis = fake
+
+    request = ActionRequest(
+        agent_id="agent-infra-001",
+        agent_type="InfraAgent",
+        token_claims=token_claims_infra,
+        action="ec2:DescribeInstances",
+        resource_arn="arn:aws:ec2:us-east-1:*:instance/*",
+        task_id="task-clean-001",
+        environment="staging",
+        source_ip="10.0.1.10",
+    )
+    pep._check_suspension(request)  # must not raise
+
+
+def test_pep_passes_through_when_redis_unavailable(token_claims_infra):
+    """If Redis is unreachable, rate limit and suspension checks must not block.
+    The primary security gate is OPA — losing Redis cannot halt all agents."""
+    pep = PolicyEnforcementPoint.__new__(PolicyEnforcementPoint)
+    pep._opa_url = "http://localhost:8181"
+    pep._cedar = MagicMock()
+    # Force _get_redis to return None (simulates Redis unreachable). Patching the
+    # method rather than the attribute, because the lazy-connect path would
+    # otherwise find a real Redis on the test host.
+    pep._get_redis = lambda: None  # type: ignore[method-assign]
+
+    request = ActionRequest(
+        agent_id="agent-infra-001",
+        agent_type="InfraAgent",
+        token_claims=token_claims_infra,
+        action="ec2:DescribeInstances",
+        resource_arn="arn:aws:ec2:us-east-1:*:instance/*",
+        task_id="task-noredis-001",
+        environment="staging",
+        source_ip="10.0.1.10",
+    )
+    # Both methods take the no-Redis branch and return without injecting/raising
+    pep._check_suspension(request)
+    pep._inject_rate_limit_count(request)
+    assert "current_action_count_per_minute" not in request.context

@@ -210,10 +210,13 @@ def test_infra_agent_emits_audit_event_on_allow():
 
     assert state["decision"] == "ALLOW"
     events = producer.drain()
-    assert len(events) == 1
-    assert events[0].decision == "ALLOW"
+    # ALLOW path emits two events: the decision (pre-execution) and the result (post-execution).
+    assert len(events) == 2
+    assert events[0].decision == "ALLOW"      # decision event — fires BEFORE execution (FR-4.4)
+    assert events[1].decision == "EXECUTED"   # result event — fires AFTER execution
     assert events[0].agent_id == "agent-infra-001"
     assert len(events[0].event_hash) == 64
+    assert len(events[1].event_hash) == 64
 
 
 @mock_aws
@@ -280,7 +283,9 @@ def test_consecutive_agent_runs_produce_linked_chain():
     )
 
     events = producer.drain()
-    assert len(events) == 2
+    # Each ALLOW run emits 2 events (decision + result); two runs = 4 events,
+    # all linked into a single hash chain.
+    assert len(events) == 4
     assert verify_chain(events) is True
 
 

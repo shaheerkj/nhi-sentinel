@@ -438,9 +438,11 @@ class TestScenarioB:
         assert state_good["decision"] == "ALLOW"
 
         events = producer.drain()
-        assert len(events) == 2
+        # 1 DENY (no execution → 1 event) + 2 ALLOW events (decision + result) = 3 total
+        assert len(events) == 3
         assert events[0].decision == "DENY"
         assert events[1].decision == "ALLOW"
+        assert events[2].decision == "EXECUTED"
         assert verify_chain(events) is True
 
 

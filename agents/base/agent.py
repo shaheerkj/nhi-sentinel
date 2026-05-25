@@ -36,11 +36,16 @@ class BaseAgent:
     """Structured state machine agent.
 
     All subclasses share the same:
-        fetch_token → load_task → policy_check → execute_tool → audit_record → END
-                                              ↘ error_handler → audit_record → END
+        fetch_token → load_task → policy_check → audit_decision → execute_tool → audit_result → END
+                                              ↘ audit_decision → error_handler → END
 
-    Every action attempt — whether ALLOW, DENY, or REQUIRE_APPROVAL — produces
-    an AuditEvent published to the AuditProducer (Kafka or in-memory fallback).
+    Two-event audit model (FR-4.4 compliant):
+      1. audit_decision — published BEFORE execution, captures ALLOW/DENY/REQUIRE_APPROVAL
+      2. audit_result   — published AFTER execution (ALLOW path only), captures outcome
+
+    The decision event is the authoritative record. If execution crashes or the
+    process dies mid-action, the decision event is still in Kafka. The result
+    event is informational and links back to the decision via task_id + action.
     """
 
     agent_type: AgentType
@@ -73,24 +78,27 @@ class BaseAgent:
         graph.add_node("fetch_token", self._node_fetch_token)
         graph.add_node("load_task", self._node_load_task)
         graph.add_node("policy_check", self._node_policy_check)
+        graph.add_node("audit_decision", self._node_audit_decision)
         graph.add_node("execute_tool", self._node_execute_tool)
-        graph.add_node("audit_record", self._node_audit_record)
+        graph.add_node("audit_result", self._node_audit_result)
         graph.add_node("error_handler", self._node_error_handler)
 
         graph.set_entry_point("fetch_token")
         graph.add_edge("fetch_token", "load_task")
         graph.add_edge("load_task", "policy_check")
 
+        # Decision is audited BEFORE any action is executed (FR-4.4).
+        graph.add_edge("policy_check", "audit_decision")
+
         graph.add_conditional_edges(
-            "policy_check",
+            "audit_decision",
             self._route_after_policy,
             {"allowed": "execute_tool", "denied": "error_handler", "approval": "error_handler"},
         )
 
-        # Both paths converge at audit_record — every action is logged.
-        graph.add_edge("execute_tool", "audit_record")
-        graph.add_edge("error_handler", "audit_record")
-        graph.add_edge("audit_record", END)
+        graph.add_edge("execute_tool", "audit_result")
+        graph.add_edge("audit_result", END)
+        graph.add_edge("error_handler", END)
 
         return graph.compile()
 
@@ -160,8 +168,12 @@ class BaseAgent:
             logger.error("Tool execution failed: %s", exc)
         return state
 
-    def _node_audit_record(self, state: AgentState) -> AgentState:
-        result = state.get("result")
+    def _node_audit_decision(self, state: AgentState) -> AgentState:
+        """Publish the decision event BEFORE execution (FR-4.4).
+
+        For ALLOW decisions, this fires before the tool runs. If execution
+        later fails or the process dies, the decision is already durable.
+        """
         event = AuditEvent(
             agent_id=self._agent_id,
             agent_type=self.agent_type.value,
@@ -172,16 +184,49 @@ class BaseAgent:
             decision_reason=state.get("error"),
             environment=state.get("environment"),
             source_ip=self._source_ip,
+            execution_result=None,
+            execution_error=None,
+        )
+        self._audit.publish(event)
+        state["context"]["_decision_event_id"] = str(event.event_id)
+        logger.info(
+            "AUDIT decision | agent=%s | task=%s | action=%s | decision=%s",
+            self._agent_id,
+            state["task_id"],
+            state.get("action"),
+            state.get("decision"),
+        )
+        return state
+
+    def _node_audit_result(self, state: AgentState) -> AgentState:
+        """Publish a follow-up result event after successful execution path.
+
+        Links back to the decision event via decision_reason="post-execution
+        update for <decision_event_id>". The hash chain remains intact because
+        this event references the prior chain head.
+        """
+        result = state.get("result")
+        decision_event_id = state["context"].get("_decision_event_id", "unknown")
+        event = AuditEvent(
+            agent_id=self._agent_id,
+            agent_type=self.agent_type.value,
+            task_id=state["task_id"],
+            action=state.get("action", state["tool_key"]),
+            resource_arn=state["resource_arn"],
+            decision="EXECUTED" if not state.get("error") else "EXECUTION_FAILED",
+            decision_reason=f"post-execution update for {decision_event_id}",
+            environment=state.get("environment"),
+            source_ip=self._source_ip,
             execution_result=result if isinstance(result, dict) else None,
             execution_error=state.get("error"),
         )
         self._audit.publish(event)
         logger.info(
-            "AUDIT | agent=%s | task=%s | action=%s | decision=%s",
+            "AUDIT result | agent=%s | task=%s | action=%s | outcome=%s",
             self._agent_id,
             state["task_id"],
             state.get("action"),
-            state.get("decision"),
+            "OK" if not state.get("error") else "FAIL",
         )
         return state
 
