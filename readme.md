@@ -196,6 +196,10 @@ docker compose up
 | Redis | 6379 | Approval queue + rate limiting |
 | LocalStack | 4566 | Extended AWS simulation |
 | Approval API | 8000 | Human approval workflow |
+| Grafana | 3000 | Metrics dashboards |
+| Operator Console (Next.js) | 3001 | Acting on the system: suspend, approve, verify chains |
+
+The operator console lives in [`ui/`](ui/) — see [`ui/README.md`](ui/README.md) for running instructions. Grafana shows trends; the console is where you click "suspend" or "approve."
 
 ---
 

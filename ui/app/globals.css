@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  background: theme('colors.bg.DEFAULT');
+  color: theme('colors.ink.DEFAULT');
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+::selection { background: theme('colors.accent.soft'); color: theme('colors.ink.DEFAULT'); }
+
+/* Subtle scrollbars to fit the dark theme */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: theme('colors.bg.soft'); }
+::-webkit-scrollbar-thumb { background: theme('colors.line'); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: theme('colors.ink.faint'); }
